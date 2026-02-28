@@ -7,7 +7,10 @@ import traceback
 import os
 import re
 
+from dotenv import load_dotenv
 from google import genai
+
+load_dotenv()
 
 app = FastAPI()
 
@@ -56,13 +59,12 @@ def analyze_error_with_ai(code: str, tb: str) -> List[int]:
         prompt = f"""
 You are a Python debugger.
 
-Given CODE and TRACEBACK, return ONLY the exact line number where the error occurred.
+Return ONLY the exact line number where the error occurred.
 
 Rules:
 - Line numbers start from 1
-- Return only ONE line number
-- Do NOT guess
-- Output JSON only like: {{"error_lines": [2]}}
+- Return ONLY ONE line number
+- Output STRICT JSON: {{"error_lines": [number]}}
 
 CODE:
 {code}
@@ -80,9 +82,15 @@ TRACEBACK:
         return result.error_lines
 
     except Exception:
-        # 🔥 Reliable fallback using traceback parsing
-        matches = re.findall(r'line (\d+)', tb)
-        return [int(matches[-1])] if matches else [1]
+        # ✅ STRONG fallback (fixes your test failures)
+        lines = tb.split("\n")
+        for line in reversed(lines):
+            if "<string>" in line and "line" in line:
+                match = re.search(r'line (\d+)', line)
+                if match:
+                    return [int(match.group(1))]
+
+        return [1]
 
 
 # -------- Endpoint --------
