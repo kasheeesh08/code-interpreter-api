@@ -1,55 +1,104 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
+from typing import List
+import sys
+from io import StringIO
+import traceback
 import os
+import re
+
 from google import genai
-from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
-class AskRequest(BaseModel):
-    video_url: str
-    topic: str
+# Enable CORS
+from fastapi.middleware.cors import CORSMiddleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# -------- Request Model --------
+class CodeRequest(BaseModel):
+    code: str
 
 
-def get_video_id(url: str):
-    return url.split("v=")[-1] if "v=" in url else url.split("/")[-1]
+# -------- Tool Function --------
+def execute_python_code(code: str) -> dict:
+    old_stdout = sys.stdout
+    sys.stdout = StringIO()
 
-
-@app.post("/ask")
-def ask(req: AskRequest):
     try:
-        video_id = get_video_id(req.video_url)
+        exec(code)
+        output = sys.stdout.getvalue()
+        return {"success": True, "output": output}
 
-        # ✅ GET TRANSCRIPT (NO DOWNLOAD → NO BOT BLOCK)
-        transcript = YouTubeTranscriptApi.get_transcript(video_id)
+    except Exception:
+        output = traceback.format_exc()
+        return {"success": False, "output": output}
 
-        text = " ".join([t["text"] for t in transcript])
+    finally:
+        sys.stdout = old_stdout
 
+
+# -------- AI Structured Output --------
+class ErrorAnalysis(BaseModel):
+    error_lines: List[int]
+
+
+def analyze_error_with_ai(code: str, tb: str) -> List[int]:
+    try:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
         prompt = f"""
-Find the FIRST timestamp where this topic appears.
+You are a Python debugger.
 
-Topic: "{req.topic}"
-
-Transcript:
-{text}
+Given CODE and TRACEBACK, return ONLY the exact line number where the error occurred.
 
 Rules:
-- Return ONLY timestamp
-- Format MUST be HH:MM:SS
+- Line numbers start from 1
+- Return only ONE line number
+- Do NOT guess
+- Output JSON only like: {{"error_lines": [2]}}
+
+CODE:
+{code}
+
+TRACEBACK:
+{tb}
 """
 
         response = client.models.generate_content(
-            model="gemini-1.5-pro",
+            model="gemini-2.0-flash",
             contents=prompt
         )
 
+        result = ErrorAnalysis.model_validate_json(response.text)
+        return result.error_lines
+
+    except Exception:
+        # 🔥 Reliable fallback using traceback parsing
+        matches = re.findall(r'line (\d+)', tb)
+        return [int(matches[-1])] if matches else [1]
+
+
+# -------- Endpoint --------
+@app.post("/code-interpreter")
+def code_interpreter(req: CodeRequest):
+    execution = execute_python_code(req.code)
+
+    if execution["success"]:
         return {
-            "timestamp": response.text.strip(),
-            "video_url": req.video_url,
-            "topic": req.topic
+            "error": [],
+            "result": execution["output"]
         }
 
-    except Exception as e:
-        return {"error": str(e)}
+    error_lines = analyze_error_with_ai(req.code, execution["output"])
+
+    return {
+        "error": error_lines,
+        "result": execution["output"]
+    }
