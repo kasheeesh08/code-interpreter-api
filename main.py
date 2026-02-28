@@ -5,9 +5,9 @@ import sys
 from io import StringIO
 import traceback
 import os
+import re
 
 from google import genai
-from google.genai import types
 
 app = FastAPI()
 
@@ -54,8 +54,15 @@ def analyze_error_with_ai(code: str, tb: str) -> List[int]:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
         prompt = f"""
-Analyze Python code and traceback.
-Return exact line numbers where error occurred.
+You are a Python debugger.
+
+Given CODE and TRACEBACK, return ONLY the exact line number where the error occurred.
+
+Rules:
+- Line numbers start from 1
+- Return only ONE line number
+- Do NOT guess
+- Output JSON only like: {{"error_lines": [2]}}
 
 CODE:
 {code}
@@ -66,31 +73,16 @@ TRACEBACK:
 
         response = client.models.generate_content(
             model="gemini-2.0-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=types.Schema(
-                    type=types.Type.OBJECT,
-                    properties={
-                        "error_lines": types.Schema(
-                            type=types.Type.ARRAY,
-                            items=types.Schema(type=types.Type.INTEGER)
-                        )
-                    },
-                    required=["error_lines"]
-                )
-            )
+            contents=prompt
         )
-
-        if not response.text:
-            return [1]
 
         result = ErrorAnalysis.model_validate_json(response.text)
         return result.error_lines
 
-    except Exception as e:
-        print("AI ERROR:", e)
-        return [1]
+    except Exception:
+        # 🔥 Reliable fallback using traceback parsing
+        matches = re.findall(r'line (\d+)', tb)
+        return [int(matches[-1])] if matches else [1]
 
 
 # -------- Endpoint --------
