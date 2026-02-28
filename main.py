@@ -1,12 +1,8 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-import yt_dlp
 import os
-import time
 from google import genai
-from dotenv import load_dotenv
-
-load_dotenv()
+from youtube_transcript_api import YouTubeTranscriptApi
 
 app = FastAPI()
 
@@ -15,73 +11,45 @@ class AskRequest(BaseModel):
     topic: str
 
 
+def get_video_id(url: str):
+    return url.split("v=")[-1] if "v=" in url else url.split("/")[-1]
+
+
 @app.post("/ask")
 def ask(req: AskRequest):
-    video_url = req.video_url
-    topic = req.topic
-    filename = "audio.mp3"
-
     try:
-        # -------- DOWNLOAD AUDIO --------
-        ydl_opts = {
-            'format': 'bestaudio',
-            'outtmpl': filename,
-            'quiet': True,
-            'no_warnings': True
-        }
+        video_id = get_video_id(req.video_url)
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([video_url])
+        # ✅ GET TRANSCRIPT (NO DOWNLOAD → NO BOT BLOCK)
+        transcript = YouTubeTranscriptApi.get_transcript(video_id)
 
-        # ✅ If download failed → DON'T CRASH
-        if not os.path.exists(filename):
-            return {
-                "timestamp": "00:00:00",
-                "video_url": video_url,
-                "topic": topic
-            }
+        text = " ".join([t["text"] for t in transcript])
 
-        # -------- GEMINI --------
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-        uploaded = client.files.upload(file=filename)
-
-        while True:
-            file_state = client.files.get(name=uploaded.name)
-            if file_state.state == "ACTIVE":
-                break
-            time.sleep(2)
-
         prompt = f"""
-Find the FIRST timestamp where this topic is spoken.
+Find the FIRST timestamp where this topic appears.
 
-Topic: "{topic}"
+Topic: "{req.topic}"
 
-Return ONLY HH:MM:SS
+Transcript:
+{text}
+
+Rules:
+- Return ONLY timestamp
+- Format MUST be HH:MM:SS
 """
 
         response = client.models.generate_content(
             model="gemini-1.5-pro",
-            contents=[uploaded, prompt]
+            contents=prompt
         )
 
-        timestamp = response.text.strip()
-
-        # -------- CLEANUP --------
-        if os.path.exists(filename):
-            os.remove(filename)
-
         return {
-            "timestamp": timestamp,
-            "video_url": video_url,
-            "topic": topic
+            "timestamp": response.text.strip(),
+            "video_url": req.video_url,
+            "topic": req.topic
         }
 
     except Exception as e:
-        # ✅ THIS PREVENTS 500 ERROR
-        return {
-            "timestamp": "00:00:00",
-            "video_url": video_url,
-            "topic": topic,
-            "error": str(e)
-        }
+        return {"error": str(e)}
