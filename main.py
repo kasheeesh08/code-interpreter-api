@@ -26,14 +26,16 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# =========================
-# PART 1: CODE INTERPRETER
-# =========================
-
+# -------- MODELS --------
 class CodeRequest(BaseModel):
     code: str
 
+class AskRequest(BaseModel):
+    video_url: str
+    topic: str
 
+
+# -------- CODE INTERPRETER --------
 def execute_python_code(code: str) -> dict:
     old_stdout = sys.stdout
     sys.stdout = StringIO()
@@ -60,8 +62,6 @@ def analyze_error_with_ai(code: str, tb: str) -> List[int]:
         client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
         prompt = f"""
-You are a Python debugger.
-
 Return ONLY the exact line number where the error occurred.
 
 Rules:
@@ -85,7 +85,6 @@ TRACEBACK:
         return result.error_lines
 
     except Exception:
-        # fallback (important for grading)
         lines = tb.split("\n")
         for line in reversed(lines):
             if "<string>" in line and "line" in line:
@@ -113,15 +112,7 @@ def code_interpreter(req: CodeRequest):
     }
 
 
-# =========================
-# PART 2: YOUTUBE ASK API
-# =========================
-
-class AskRequest(BaseModel):
-    video_url: str
-    topic: str
-
-
+# -------- ASK ENDPOINT --------
 @app.post("/ask")
 def ask(req: AskRequest):
     video_url = req.video_url
@@ -129,11 +120,9 @@ def ask(req: AskRequest):
 
     filename = "audio.%(ext)s"
 
-    # -------- DOWNLOAD AUDIO --------
     ydl_opts = {
         'format': 'bestaudio/best',
         'outtmpl': filename,
-        'quiet': True,
         'postprocessors': [{
             'key': 'FFmpegExtractAudio',
             'preferredcodec': 'mp3',
@@ -147,17 +136,14 @@ def ask(req: AskRequest):
 
     client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
 
-    # -------- UPLOAD FILE --------
     uploaded = client.files.upload(file=audio_file)
 
-    # -------- WAIT UNTIL READY --------
     while True:
         file_state = client.files.get(name=uploaded.name)
         if file_state.state == "ACTIVE":
             break
         time.sleep(2)
 
-    # -------- ASK GEMINI --------
     prompt = f"""
 Find the FIRST timestamp where this topic is spoken.
 
@@ -166,7 +152,7 @@ Topic: "{topic}"
 Rules:
 - Return ONLY timestamp
 - Format MUST be HH:MM:SS
-- Do NOT return anything else
+- No explanation
 """
 
     response = client.models.generate_content(
@@ -176,7 +162,6 @@ Rules:
 
     timestamp = response.text.strip()
 
-    # -------- CLEANUP --------
     if os.path.exists(audio_file):
         os.remove(audio_file)
 
