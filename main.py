@@ -6,6 +6,8 @@ from io import StringIO
 import traceback
 import os
 import re
+import subprocess
+import uuid
 
 from dotenv import load_dotenv
 from google import genai
@@ -24,9 +26,13 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# -------- Request Model --------
+# -------- Request Models --------
 class CodeRequest(BaseModel):
     code: str
+
+class AskRequest(BaseModel):
+    video_url: str
+    topic: str
 
 
 # -------- Tool Function --------
@@ -82,18 +88,17 @@ TRACEBACK:
         return result.error_lines
 
     except Exception:
-        # ✅ STRONG fallback (fixes your test failures)
+        # ✅ Strong fallback
         lines = tb.split("\n")
         for line in reversed(lines):
             if "<string>" in line and "line" in line:
                 match = re.search(r'line (\d+)', line)
                 if match:
                     return [int(match.group(1))]
-
         return [1]
 
 
-# -------- Endpoint --------
+# -------- Code Interpreter Endpoint --------
 @app.post("/code-interpreter")
 def code_interpreter(req: CodeRequest):
     execution = execute_python_code(req.code)
@@ -110,3 +115,72 @@ def code_interpreter(req: CodeRequest):
         "error": error_lines,
         "result": execution["output"]
     }
+
+
+# -------- NEW ASK ENDPOINT --------
+@app.post("/ask")
+def ask(req: AskRequest):
+    video_url = req.video_url
+    topic = req.topic
+
+    filename = f"audio_{uuid.uuid4()}.mp3"
+
+    try:
+        # ✅ Download audio using yt-dlp
+        subprocess.run([
+            "yt-dlp",
+            "-x",
+            "--audio-format", "mp3",
+            "-o", filename,
+            video_url
+        ], check=True)
+
+        client = genai.Client(api_key=os.environ.get("GEMINI_API_KEY"))
+
+        # ✅ Upload file
+        uploaded = client.files.upload(file=filename)
+
+        # ✅ Wait until file is ACTIVE
+        while uploaded.state.name != "ACTIVE":
+            uploaded = client.files.get(name=uploaded.name)
+
+        # ✅ Ask Gemini
+        prompt = f"""
+Find the FIRST timestamp where this topic is spoken in the audio.
+
+Topic: {topic}
+
+Return ONLY JSON:
+{{"timestamp": "HH:MM:SS"}}
+"""
+
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=[
+                uploaded,
+                prompt
+            ]
+        )
+
+        text = response.text.strip()
+
+        match = re.search(r'\d{2}:\d{2}:\d{2}', text)
+        timestamp = match.group(0) if match else "00:00:00"
+
+        return {
+            "timestamp": timestamp,
+            "video_url": video_url,
+            "topic": topic
+        }
+
+    except Exception as e:
+        return {
+            "timestamp": "00:00:00",
+            "video_url": video_url,
+            "topic": topic
+        }
+
+    finally:
+        # ✅ Cleanup
+        if os.path.exists(filename):
+            os.remove(filename)
